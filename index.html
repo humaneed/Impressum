@@ -295,6 +295,8 @@
       border-radius:var(--radius-lg);
       background:rgba(245,240,232,.7);
       touch-action:none;
+      -webkit-user-select:none;
+      user-select:none;
     }
 
     .hud-note{
@@ -343,6 +345,7 @@
       font-weight:900;
       cursor:pointer;
       transition:transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+      touch-action:none;
     }
     .pad button:active, .actionsPad button:active{ transform:scale(0.98); box-shadow:none; }
     .pad button:hover, .actionsPad button:hover{ box-shadow:var(--shadow-soft); transform:translateY(-1px); }
@@ -458,6 +461,70 @@
       footer{ padding:var(--s-2); }
       .touchbar{ padding:var(--s-2); }
     }
+
+    /* =========================
+       MOBILE GAME LAYOUT PATCH
+       - verhindert Scroll-Jank
+       - Canvas nutzt verfügbaren Platz
+       - Touchbar bleibt unten
+    ========================= */
+    #app-frame.playing .viewport{
+      padding: 0;
+      overflow: hidden; /* wichtig: keine Seite scrollt beim Halten */
+    }
+
+    /* beim Spielen: nur game-shell anzeigen (Hero + Startkarten ausblenden) */
+    #app-frame.playing .viewport > :not(#game-shell){
+      display: none !important;
+    }
+
+    /* game-shell wird flex layout, nimmt volle viewport-höhe ein */
+    #app-frame.playing #game-shell{
+      display: flex !important;
+      flex-direction: column;
+      height: 100%;
+      border-radius: 0;
+    }
+
+    /* Canvas-Bereich wächst, Touchbar bleibt unten */
+    #app-frame.playing .canvas-wrap{
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      padding: var(--s-2);
+      min-height: 0; /* wichtig für flex */
+    }
+
+    /* Canvas zentrieren + wirklich Platz nutzen */
+    #app-frame.playing canvas{
+      margin: 0 auto;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Touchbar sticky unten + safe area */
+    #app-frame.playing .touchbar{
+      flex: 0 0 auto;
+      position: sticky;
+      bottom: 0;
+      padding-bottom: max(var(--s-2), env(safe-area-inset-bottom));
+      z-index: 5;
+    }
+
+    /* Touch-Controls: kein Scrollen/Zoom-Gefummel beim Halten */
+    .pad, .actionsPad, .pad button, .actionsPad button{
+      touch-action: none;
+    }
+
+    /* Größere Buttons auf Touch-Geräten */
+    @media (pointer: coarse){
+      .pad{ grid-template-rows: repeat(3, 64px); }
+      .actionsPad{ grid-template-rows: repeat(3, 64px); }
+      .pad button, .actionsPad button{
+        font-size: 20px;
+        border-width: 2px;
+      }
+    }
   </style>
 </head>
 
@@ -517,6 +584,7 @@
       <div class="row" style="margin-top: var(--s-2);">
         <button class="btn" id="howto" type="button">❓ Steuerung</button>
         <button class="btn" id="toggle-sfx" type="button" aria-pressed="true">🔊 Sound: an</button>
+        <button class="btn" id="toggle-swipe" type="button" aria-pressed="true">👆 Wischen: an</button>
       </div>
     </div>
 
@@ -591,7 +659,7 @@
   <div class="overlay" id="howto-overlay" role="dialog" aria-modal="true" aria-label="Steuerung">
     <div class="sheet">
       <h2>Steuerung</h2>
-      <p>Auf Tablet/Mobil: Buttons unten. Am Computer: Tastatur.</p>
+      <p>Auf Tablet/Mobil: Buttons unten oder mit dem Finger wischen. Am Computer: Tastatur.</p>
 
       <div class="card" style="margin-bottom: var(--s-2);">
         <div class="row" style="justify-content:space-between; align-items:center;">
@@ -602,6 +670,9 @@
           <strong>Bewegen:</strong> WASD / Pfeile • <strong>Spritz:</strong> Leertaste<br>
           <strong>Aktion halten:</strong> E (Beacon setzen/entschärfen)<br>
           <strong>Pause:</strong> P • <strong>Runde neu:</strong> R
+          <br><br>
+          <strong>Wischen:</strong> Finger auf dem Spielfeld halten & ziehen = bewegen<br>
+          <strong>Tippen:</strong> 1× Spritz • <strong>Long-Press:</strong> Aktion halten ✨
         </p>
       </div>
 
@@ -677,7 +748,8 @@
     coins: 'kidsneed_coins',
     grade: 'kidsneed_grade',
     sfx:  'kidsneed_sfx',
-    ss_best: 'kidsneed_ss_best'
+    ss_best: 'kidsneed_ss_best',
+    swipe: 'kidsneed_ss_swipe'
   };
 
   const clampGrade = (g) => {
@@ -706,6 +778,8 @@
 
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
+
+  const appFrame = document.getElementById('app-frame');
 
   const coinCountEl = $('#coin-count');
   const gradeValEl = $('#grade-val');
@@ -803,9 +877,10 @@
 
   $('#reset-all')?.addEventListener('click', () => {
     if (!confirm('Wirklich alle Daten zurücksetzen? (Punkte, Klasse, Bestwerte)')) return;
-    del(LS.coins); del(LS.grade); del(LS.ss_best); del(LS.sfx);
+    del(LS.coins); del(LS.grade); del(LS.ss_best); del(LS.sfx); del(LS.swipe);
     updateHeader();
     setSfxUI(true);
+    setSwipeUI(true);
     closeOverlay(parentOverlay);
   });
 
@@ -858,6 +933,28 @@
   setSfxUI(sfxOn);
 
   /* =========================
+     Swipe Toggle
+  ========================== */
+  let swipeOn = getBool(LS.swipe, true);
+  const swipeBtn = $('#toggle-swipe');
+
+  const setSwipeUI = (on) => {
+    swipeOn = !!on;
+    setStr(LS.swipe, swipeOn ? '1' : '0');
+    if (swipeBtn){
+      swipeBtn.textContent = swipeOn ? '👆 Wischen: an' : '👆 Wischen: aus';
+      swipeBtn.setAttribute('aria-pressed', swipeOn ? 'true' : 'false');
+    }
+  };
+
+  swipeBtn?.addEventListener('click', () => {
+    setSwipeUI(!swipeOn);
+    beep(swipeOn ? 680 : 220, 0.06, 'square', 0.05);
+  });
+
+  setSwipeUI(swipeOn);
+
+  /* =========================
      Game Core: Sticker-Strike
      - 2D top-down
      - Teams: Builder (A) vs Guard (B)
@@ -890,13 +987,29 @@
   const DPR = () => Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
 
   const resizeCanvas = () => {
-    // Keep a stable internal resolution but crisp on DPR
-    const wrapW = canvas.clientWidth;
-    const ratio = 900/560;
-    const h = Math.round(wrapW / ratio);
-    canvas.style.height = h + 'px';
+    const wrap = canvas?.parentElement; // .canvas-wrap
+    if (!wrap) return;
+
+    const r = wrap.getBoundingClientRect();
     const dpr = DPR();
-    canvas.width = Math.round(wrapW * dpr);
+
+    // Ratio bleibt stabil
+    const ratio = 900/560;
+
+    // Zielgröße in CSS-Pixeln
+    let w = Math.max(260, r.width);
+    let h = w / ratio;
+
+    const maxH = Math.max(220, r.height);
+    if (h > maxH){
+      h = maxH;
+      w = h * ratio;
+    }
+
+    canvas.style.width = `${Math.round(w)}px`;
+    canvas.style.height = `${Math.round(h)}px`;
+
+    canvas.width  = Math.round(w * dpr);
     canvas.height = Math.round(h * dpr);
   };
 
@@ -918,18 +1031,22 @@
 
   const bindHoldButton = (btn, key) => {
     if (!btn) return;
-    const down = (e) => { e.preventDefault(); input[key]=true; };
-    const up = (e) => { e.preventDefault(); input[key]=false; };
 
-    btn.addEventListener('pointerdown', down);
-    btn.addEventListener('pointerup', up);
-    btn.addEventListener('pointercancel', up);
-    btn.addEventListener('pointerleave', up);
+    const down = (e) => {
+      e.preventDefault();
+      input[key]=true;
+      try { btn.setPointerCapture?.(e.pointerId); } catch {}
+    };
+    const up = (e) => {
+      e.preventDefault();
+      input[key]=false;
+      try { btn.releasePointerCapture?.(e.pointerId); } catch {}
+    };
 
-    // fallback touch
-    btn.addEventListener('touchstart', down, {passive:false});
-    btn.addEventListener('touchend', up, {passive:false});
-    btn.addEventListener('touchcancel', up, {passive:false});
+    btn.addEventListener('pointerdown', down, {passive:false});
+    btn.addEventListener('pointerup', up, {passive:false});
+    btn.addEventListener('pointercancel', up, {passive:false});
+    btn.addEventListener('pointerleave', up, {passive:false});
   };
 
   bindHoldButton($('#btn-up'), 'up');
@@ -979,7 +1096,6 @@
     w: 900,
     h: 560,
     walls: [
-      // outer safety margins are implicit by collision clamp
       {x: 240, y: 90,  w: 420, h: 22},
       {x: 240, y: 448, w: 420, h: 22},
       {x: 120, y: 210, w: 22,  h: 140},
@@ -1005,19 +1121,16 @@
   };
 
   const resolveCollisions = (ent) => {
-    // keep in bounds
     ent.x = clamp(ent.x, 18, MAP.w-18);
     ent.y = clamp(ent.y, 18, MAP.h-18);
 
     for (const w of MAP.walls){
       if (circleRectHit(ent.x, ent.y, ent.r, w.x, w.y, w.w, w.h)){
-        // simple push-out: move away from rect center
         const cx = w.x + w.w/2, cy = w.y + w.h/2;
         const dx = ent.x - cx, dy = ent.y - cy;
         const L = Math.max(0.001, Math.hypot(dx,dy));
         ent.x += (dx/L) * 4.2;
         ent.y += (dy/L) * 4.2;
-        // clamp again
         ent.x = clamp(ent.x, 18, MAP.w-18);
         ent.y = clamp(ent.y, 18, MAP.h-18);
       }
@@ -1028,7 +1141,7 @@
 
   const state = {
     running:false,
-    role:'A', // player team (A builder) or B guard
+    role:'A',
     round:1,
     maxRounds:5,
     timeLeft:60,
@@ -1041,6 +1154,129 @@
     scoreB: 0,
     paused:false,
     diff:'mid'
+  };
+
+  /* =========================
+     Swipe / Finger-Drag Control (Canvas)
+     - 1 Finger ziehen: Bewegung
+     - Tap: 1x Spritz
+     - Longpress: Aktion halten
+  ========================== */
+  const swipe = {
+    active:false,
+    id:null,
+    sx:0, sy:0,
+    t0:0,
+    moved:false,
+    long:false,
+    lp:null
+  };
+
+  const SW = {
+    dead: 18,
+    tapMove: 12,
+    longMs: 260
+  };
+
+  const clearMove = () => { input.up=input.down=input.left=input.right=false; };
+
+  const setMoveFromDelta = (dx, dy) => {
+    const ax = Math.abs(dx), ay = Math.abs(dy);
+    clearMove();
+    if (ax < SW.dead && ay < SW.dead) return;
+
+    // Diagonal erlaubt (für weichere Steuerung)
+    if (ax >= SW.dead){
+      if (dx < 0) input.left = true;
+      if (dx > 0) input.right = true;
+    }
+    if (ay >= SW.dead){
+      if (dy < 0) input.up = true;
+      if (dy > 0) input.down = true;
+    }
+  };
+
+  const fireTap = () => {
+    input.fire = true;
+    setTimeout(() => { input.fire = false; }, 80);
+  };
+
+  const enableSwipeHandlers = () => {
+    if (!canvas) return;
+
+    const isCoarse = () => window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
+    canvas.addEventListener('pointerdown', (e) => {
+      if (!state.running || state.paused) return;
+      if (!swipeOn) return;
+      if (!isCoarse()) return;
+      if (e.pointerType !== 'touch') return;
+
+      e.preventDefault();
+      swipe.active = true;
+      swipe.id = e.pointerId;
+      swipe.sx = e.clientX;
+      swipe.sy = e.clientY;
+      swipe.t0 = performance.now();
+      swipe.moved = false;
+      swipe.long = false;
+      clearMove();
+
+      swipe.lp = setTimeout(() => {
+        if (!swipe.active) return;
+        if (swipe.moved) return;
+        swipe.long = true;
+        input.action = true;
+      }, SW.longMs);
+
+      try { canvas.setPointerCapture?.(e.pointerId); } catch {}
+    }, {passive:false});
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!swipe.active || e.pointerId !== swipe.id) return;
+      if (!swipeOn) return;
+
+      e.preventDefault();
+      const dx = e.clientX - swipe.sx;
+      const dy = e.clientY - swipe.sy;
+
+      if (Math.abs(dx) > SW.tapMove || Math.abs(dy) > SW.tapMove){
+        swipe.moved = true;
+        if (swipe.lp){ clearTimeout(swipe.lp); swipe.lp=null; }
+        if (swipe.long){ swipe.long=false; input.action=false; }
+      }
+
+      setMoveFromDelta(dx, dy);
+    }, {passive:false});
+
+    const end = (e) => {
+      if (!swipe.active || e.pointerId !== swipe.id) return;
+      e.preventDefault();
+
+      if (swipe.lp){ clearTimeout(swipe.lp); swipe.lp=null; }
+
+      if (swipe.long){
+        input.action = false;
+        swipe.long = false;
+      } else {
+        const dt = performance.now() - swipe.t0;
+        const dx = e.clientX - swipe.sx;
+        const dy = e.clientY - swipe.sy;
+        const moved = (Math.abs(dx) > SW.tapMove || Math.abs(dy) > SW.tapMove);
+        if (!moved && dt < 280){
+          fireTap();
+        }
+      }
+
+      swipe.active = false;
+      swipe.id = null;
+      swipe.moved = false;
+      clearMove();
+      try { canvas.releasePointerCapture?.(e.pointerId); } catch {}
+    };
+
+    canvas.addEventListener('pointerup', end, {passive:false});
+    canvas.addEventListener('pointercancel', end, {passive:false});
   };
 
   const makeEntity = (team, kind='bot') => {
@@ -1074,7 +1310,6 @@
     state.projectiles.length = 0;
     state.entities.length = 0;
 
-    // 1 player + 3 bots each side
     state.entities.push(makeEntity(state.role, 'player'));
     const other = state.role === 'A' ? 'B' : 'A';
     for (let i=0;i<3;i++) state.entities.push(makeEntity(state.role, 'bot'));
@@ -1097,14 +1332,23 @@
     state.round = 1;
     state.scoreA = 0; state.scoreB = 0;
     state.diff = difficultySel?.value || 'mid';
+
     shell.style.display = 'block';
-    shell.scrollIntoView({behavior:'smooth', block:'start'});
+    appFrame?.classList.add('playing');
+
+    // Desktop: gerne scrollen, Mobile: lieber nicht (verhindert Jump)
+    if (!window.matchMedia('(pointer: coarse)').matches){
+      shell.scrollIntoView({behavior:'smooth', block:'start'});
+    }
+
     state.running = true;
     state.paused = false;
     input.paused = false;
+
     resetRound();
     resizeCanvas();
     state.lastT = now();
+
     beep(520, 0.08, 'sine', 0.07);
   };
 
@@ -1172,34 +1416,27 @@
     const enemyTeam = me.team === 'A' ? 'B' : 'A';
     const enemies = state.entities.filter(e => e.team === enemyTeam && e.alive && e.stun<=0);
 
-    // Objective target
     let tx = me.x, ty = me.y;
     if (me.team === 'A'){
       if (!state.beacon.planted){
         const z = nearestZone(me.x, me.y);
         tx = z.x; ty = z.y;
-        // bot may "plant" if inside
         const inside = distToZone(me.x, me.y, z) <= 0;
         if (inside) me.actionHold += dt; else me.actionHold = Math.max(0, me.actionHold - dt*0.6);
         if (inside && me.actionHold > 2.6){
-          // plant
           plantBeacon(z.id);
           me.actionHold = 0;
         }
       } else {
-        // after planting: move away slightly to “guard”
         const z = MAP.zones.find(z=>z.id===state.beacon.zoneId);
         tx = clamp(z.x + (me.x<z.x?-90:90), 40, MAP.w-40);
         ty = clamp(z.y + (me.y<z.y?-90:90), 40, MAP.h-40);
       }
     } else {
-      // defenders
       if (!state.beacon.planted){
-        // patrol between zones
         const z = (Math.sin(now()/1200 + parseInt(me.id.slice(-2),16)) > 0) ? MAP.zones[0] : MAP.zones[1];
         tx = z.x; ty = z.y;
       } else {
-        // go disarm
         const z = MAP.zones.find(z=>z.id===state.beacon.zoneId);
         tx = z.x; ty = z.y;
         const inside = distToZone(me.x, me.y, z) <= 0;
@@ -1211,19 +1448,15 @@
       }
     }
 
-    // Move toward target
     const dx = tx - me.x, dy = ty - me.y;
     const L = Math.max(0.001, Math.hypot(dx,dy));
     const vx = (dx/L) * botSpeed;
     const vy = (dy/L) * botSpeed;
 
-    // slight wobble
     me.vx = vx + Math.cos(now()/400 + me.aim)*18;
     me.vy = vy + Math.sin(now()/420 + me.aim)*18;
 
-    // Aim & shoot if enemy nearby
     if (enemies.length){
-      // pick closest
       let t = enemies[0], td = Infinity;
       for (const e of enemies){
         const d = len(e.x-me.x, e.y-me.y);
@@ -1265,12 +1498,10 @@
     showHint(`Entschärft! Gute Rettung ✅`, 1800);
     beep(520, 0.10, 'sine', 0.07);
 
-    // defenders win round if they disarm
     endRound('B');
   };
 
   const endRound = (winnerTeam) => {
-    // scoring
     if (winnerTeam === 'A') state.scoreA++; else state.scoreB++;
 
     const playerTeam = state.role;
@@ -1278,11 +1509,9 @@
 
     uiStatus.textContent = won ? 'gewonnen' : 'verloren';
 
-    // coins: win=3, loss=1
     awardCoins(won ? 3 : 1);
     beep(won ? 660 : 190, 0.12, won ? 'triangle' : 'sine', 0.07);
 
-    // next round
     state.round++;
     if (state.round > state.maxRounds){
       const totalWon = (playerTeam === 'A') ? state.scoreA : state.scoreB;
@@ -1294,12 +1523,10 @@
       awardCoins(totalWon >= totalLost ? 5 : 2);
       showHint(msg, 2600);
 
-      // reset match
       state.round = 1;
       state.scoreA = 0; state.scoreB = 0;
     }
 
-    // small delay then new round
     state.paused = true;
     setTimeout(() => {
       state.paused = false;
@@ -1316,33 +1543,26 @@
     if (state.timeLeft < 0) state.timeLeft = 0;
     uiTime.textContent = String(Math.ceil(state.timeLeft));
 
-    // Time out rule:
-    // - If beacon not planted: defenders win (held)
-    // - If planted: if detonates => attackers win
     if (state.timeLeft <= 0){
-      if (!state.beacon.planted) endRound('B');
-      else endRound('B'); // if time ends while planted, we keep it simple: defenders survive
+      // simpel & kidsafe: Zeit vorbei = Schutz-Team gewinnt (halten überlebt)
+      endRound('B');
       return;
     }
 
-    // Beacon countdown
     if (state.beacon.planted){
       state.beacon.detonateIn -= dt;
       uiGoal.textContent = `Beacon: ${Math.ceil(state.beacon.detonateIn)}s (Zone ${state.beacon.zoneId})`;
       if (state.beacon.detonateIn <= 0){
-        // attackers win
         showHint('Beacon leuchtet fertig – Bau-Team gewinnt ⭐', 2200);
         endRound('A');
         return;
       }
     }
 
-    // Entities
     const { playerSpeed } = diffParams();
     for (const e of state.entities){
       if (!e.alive) continue;
 
-      // Respawn/stun
       if (e.stun > 0){
         e.stun -= dt;
         e.vx *= 0.85; e.vy *= 0.85;
@@ -1372,19 +1592,16 @@
         e.vx = mx * playerSpeed;
         e.vy = my * playerSpeed;
 
-        // Aim direction (based on movement; fallback keep)
         if (Math.abs(mx)+Math.abs(my) > 0.01){
           e.aim = Math.atan2(my, mx);
         }
 
-        // Fire
         e.fireCD = (e.fireCD || 0) - dt;
         if (input.fire && e.fireCD <= 0){
           e.fireCD = 0.22;
           spawnProjectile(e, e.aim);
         }
 
-        // Action (plant/disarm)
         const z = nearestZone(e.x, e.y);
         const inside = distToZone(e.x, e.y, z) <= 0;
 
@@ -1410,20 +1627,17 @@
         botBrain(e, dt);
       }
 
-      // Apply movement
       e.x += e.vx * dt;
       e.y += e.vy * dt;
       resolveCollisions(e);
     }
 
-    // Projectiles
     for (let i=state.projectiles.length-1; i>=0; i--){
       const p = state.projectiles[i];
       p.life -= dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
 
-      // wall hit: simple disappear
       let hitWall = false;
       for (const w of MAP.walls){
         if (p.x >= w.x && p.x <= w.x+w.w && p.y >= w.y && p.y <= w.y+w.h){
@@ -1431,7 +1645,6 @@
         }
       }
 
-      // entity hit
       if (!hitWall){
         for (const e of state.entities){
           if (!e.alive || e.respawn>0) continue;
@@ -1439,10 +1652,8 @@
           if (e.stun>0) continue;
           const d = len(e.x-p.x, e.y-p.y);
           if (d < e.r + p.r){
-            // tag/stun
             e.stun = 0.85;
             e.respawn = 2.1;
-            // little push
             const ang = Math.atan2(e.y-p.y, e.x-p.x);
             e.x += Math.cos(ang)*8;
             e.y += Math.sin(ang)*8;
@@ -1463,21 +1674,17 @@
 
   const draw = () => {
     if (!state.running) return;
-    const dpr = DPR();
     const W = canvas.width, H = canvas.height;
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,W,H);
 
-    // map-space scaling
     const sx = W / MAP.w;
     const sy = H / MAP.h;
     ctx.scale(sx, sy);
 
-    // background texture hint (safe, minimal)
     ctx.fillStyle = 'rgba(245,240,232,.55)';
     ctx.fillRect(0,0,MAP.w,MAP.h);
 
-    // zones
     for (const z of MAP.zones){
       ctx.beginPath();
       ctx.arc(z.x, z.y, z.r, 0, Math.PI*2);
@@ -1494,7 +1701,6 @@
       ctx.fillText(`ZONE ${z.id}`, z.x, z.y);
     }
 
-    // walls
     for (const w of MAP.walls){
       ctx.fillStyle = 'rgba(0,0,0,0.06)';
       ctx.fillRect(w.x,w.y,w.w,w.h);
@@ -1503,7 +1709,6 @@
       ctx.strokeRect(w.x,w.y,w.w,w.h);
     }
 
-    // beacon
     if (state.beacon.planted){
       const x = state.beacon.x, y = state.beacon.y;
       const pulse = 0.5 + 0.5*Math.sin(now()/160);
@@ -1527,7 +1732,6 @@
       ctx.fillText('BEACON', x, y+18);
     }
 
-    // projectiles
     for (const p of state.projectiles){
       ctx.beginPath();
       ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
@@ -1538,9 +1742,7 @@
       ctx.stroke();
     }
 
-    // entities
     for (const e of state.entities){
-      // “respawn”: draw faint ghost at spawn
       if (e.respawn > 0){
         const sp = MAP.spawns[e.team];
         ctx.beginPath();
@@ -1555,7 +1757,6 @@
 
       const fill = e.team === 'A' ? 'rgba(123,160,138,0.9)' : 'rgba(196,114,108,0.9)';
 
-      // body
       ctx.beginPath();
       ctx.arc(e.x,e.y,e.r,0,Math.PI*2);
       ctx.fillStyle = fill;
@@ -1564,7 +1765,6 @@
       ctx.strokeStyle = COLORS.ink;
       ctx.stroke();
 
-      // face direction (tiny)
       const ex = e.x + Math.cos(e.aim)*10;
       const ey = e.y + Math.sin(e.aim)*10;
       ctx.beginPath();
@@ -1575,7 +1775,6 @@
       ctx.strokeStyle = COLORS.ink;
       ctx.stroke();
 
-      // stun ring
       if (e.stun > 0){
         const t = 0.5 + 0.5*Math.sin(now()/120);
         ctx.beginPath();
@@ -1585,7 +1784,6 @@
         ctx.stroke();
       }
 
-      // label
       ctx.fillStyle = COLORS.ink;
       ctx.font = '900 12px Nunito, system-ui, sans-serif';
       ctx.textAlign = 'center';
@@ -1593,7 +1791,6 @@
       ctx.fillText(e.kind==='player' ? 'DU' : '', e.x, e.y - e.r - 6);
     }
 
-    // top mini legend (in map coords)
     const pl = player();
     if (pl){
       ctx.fillStyle = 'rgba(0,0,0,0.06)';
@@ -1612,7 +1809,6 @@
       ctx.fillText(tObj, 30, 48);
     }
 
-    // paused overlay
     if (state.paused){
       ctx.fillStyle = 'rgba(0,0,0,0.18)';
       ctx.fillRect(0,0,MAP.w,MAP.h);
@@ -1647,18 +1843,18 @@
   const onResize = () => { if (!state.running) return; resizeCanvas(); };
   window.addEventListener('resize', onResize);
 
-  /* Pause button in touch pad */
-  $('#btn-reset')?.addEventListener('click', () => showHint('Runde neu gestartet ↻', 900));
+  /* Touch beeps */
   $('#btn-action')?.addEventListener('pointerdown', () => beep(540, 0.03, 'sine', 0.03));
   $('#btn-fire')?.addEventListener('pointerdown', () => beep(740, 0.02, 'square', 0.03));
-
-  /* Desktop pause shortcut button already exists */
-  $('#btn-reset')?.addEventListener('click', hardResetRound);
+  $('#btn-reset')?.addEventListener('click', () => showHint('Runde neu gestartet ↻', 900));
 
   /* Keep UI consistent */
   updateHeader();
-  console.log('✅ Sticker-Strike geladen.');
 
+  // Swipe-Hander erst aktivieren, wenn alles existiert
+  enableSwipeHandlers();
+
+  console.log('✅ Sticker-Strike geladen.');
   loop();
 })();
 </script>
